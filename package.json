@@ -1,0 +1,25 @@
+{
+  "name": "req-queue-simulator",
+  "version": "1.0.0",
+  "description": "simulate a request queue",
+  "main": "simulate.js",
+  "scripts": {
+    "sim": "./node_modules/.bin/ts-node --files src/simulate && python plot.py",
+    "prettify": "prettier --config ./node_modules/resin-lint/config/.prettierrc --write \"{src}/**/*.ts\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "dt-rush <nickp@balena.io>",
+  "license": "MIT",
+  "dependencies": {
+    "@types/stats": "^0.16.30",
+    "eventemitter3": "^3.1.2",
+    "jStat": "^1.7.1",
+    "resin-lint": "^3.0.2",
+    "ts-node": "^8.1.0",
+    "typescript": "^3.4.5",
+    "yargs": "^13.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^12.0.0"
+  }
+}
