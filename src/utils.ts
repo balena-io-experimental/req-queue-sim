@@ -11,3 +11,5 @@ export const mean = arr => sum(arr) / arr.length;
 export const min = (a, b) => Math.min(a, b);
 
 export const max = (a, b) => Math.max(a, b);
+
+export const clamp = (x, a, b) => max(a, min(b, x))

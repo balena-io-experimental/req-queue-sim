@@ -1,4 +1,5 @@
 import { jStat } from 'jStat'
+import { clamp } from './utils'
 
 import {
 	SimulationSettings,
@@ -18,50 +19,73 @@ export const default_settings: SimulationSettings = {
 	runtime: 10 * 60000
 }
 
-const control_slowdown = new SimulationControl((s: Simulation) => {
+
+
+// control the slowdown factor, which multiplies the time taken by
+// requests to complete
+
+const control_slowdown = (s: Simulation) => {
+	// describe a bell-shaped function of slowdown
 	const slowdown_peak = s.settings.runtime/4
 	const amplitude = 400
 	const width = 80000
 	const shift = 5000
 	const bellDivisor = Math.pow((1 + Math.pow(((s.clock.t - shift)/width - slowdown_peak/(2*width)), 2)), 2)
-	const clampWidth = 10000
-	const clampDecay = 44000
-	const clampFactor = Math.pow(Math.E, (s.clock.t - clampDecay) / clampWidth )
-	const clamp = clampFactor / (1 + clampFactor)
-	s.settings.slowdown = clamp * amplitude / bellDivisor
-})
+	const bell = amplitude / bellDivisor
+	// multiply the slowdown factor bell-shaped distribution above by a sigmoid function which
+	// ramps up from 0 to 1 (so we have a certain amount of service at the start which is not
+	// affected by the slowdown
+	const rampWidth = 10000
+	const rampDecay = 44000
+	const rampFactor = Math.pow(Math.E, (s.clock.t - rampDecay) / rampWidth )
+	const ramp = rampFactor / (1 + rampFactor)
+	// the slowdown is the product of the ramp and bell functions defined above
+	s.settings.slowdown = ramp * bell
+}
 
-const control_mean_log_rps = new SimulationControl((s: Simulation) => {
+
+
+// Control the mean of the logarithmic distribution of requests-per-second
+// arriving at the queue
+
+const control_mean_log_rps = (s: Simulation) => {
 	s.settings.mean_log_rps = default_settings.mean_log_rps + 20 * s.clock.percent()
-})
+}
 
-const alpha = 0.2
-const beta = 0.1
-const gamma = 0.3
-const t_update = 1000
+
+
+// A controller for dropping queued requests during periods of excessive timeout
+// according roughly to the implementation in RFC 8066 for TCP packets in buffers
+
+
 let last_t = 0
-const window = 5
 let p = 0
-const pid_control = new SimulationControl((s: Simulation) => {
+const pid_control = (s: Simulation) => {
+	const window = 5
+	const alpha = 0.2
+	const beta = 0.1
+	const gamma = 0.3
+	const phi = 0.3
+	const t_update = 1000
 	if (s.clock.t - last_t > t_update) {
 		last_t = s.clock.t
 		if (s.timeseries.length > window * t_update) {
 			const last_metric = s.timeseries[s.timeseries.length - t_update]
 			const metric = s.timeseries[s.timeseries.length - 1]
-			const last_p_timeout = Math.max(0, Math.min(1, last_metric.timed_out / (last_metric.arrived + 1)))
-			const p_timeout = Math.max(0, Math.min(1, metric.timed_out / (metric.arrived + 1)))
+			const last_p_timeout = clamp(last_metric.timed_out / (last_metric.arrived + 1), 0, 1)
+			const p_timeout = clamp(metric.timed_out / (metric.arrived + 1), 0, 1)
 			let p_sum = 0
 			for (let i = 0; i < window; i++) {
 				const metric = s.timeseries[s.timeseries.length - 1 - t_update * i]
-				p_sum += Math.max(0, Math.min(1, metric.timed_out / (metric.arrived + 1)))
+				p_sum += clamp(metric.timed_out / (metric.arrived + 1), 0, 1)
 			}
-			p = alpha * p_timeout + beta * (p_timeout - last_p_timeout) + gamma * p_sum
+			p = phi * (alpha * p_timeout + beta * (p_timeout - last_p_timeout) + gamma * p_sum) + (1 - phi) * p
 			if (p < 0.01) {
 				p /= 8
 			} else if (p < 0.1) {
 				p /= 2
 			}
-			p = Math.max(0, Math.min(1, p))
+			p = clamp(p, 0, 1)
 		}
 	}
 	const n_to_drop = s.queue.length * p
@@ -70,7 +94,7 @@ const pid_control = new SimulationControl((s: Simulation) => {
 	s.queue.splice(s.queue.length - (n_to_drop / 2), s.queue.length)
 	s.metrics.rejected = n_to_drop
 	s.metrics.drop_p = p
-})
+}
 
 export const controls = [
 	control_slowdown,

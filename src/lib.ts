@@ -1,6 +1,8 @@
 import { jStat } from 'jStat'
 import * as fs from 'fs'
 
+// class to manage the passage of time, and measuring time's passage
+// (Simulation instance will have one clock)
 export class Clock {
 	// the current time (in ms)
 	public t: number
@@ -26,6 +28,7 @@ export class Clock {
 	}
 }
 
+// class to represent requests arriving, waiting, being served, and completing / timing out
 export class Request {
 	public arrival_t: number
 	public start_t: number
@@ -33,37 +36,49 @@ export class Request {
 	public in_progress: boolean
 	public complete: boolean
 	public timed_out: boolean
-	public clock: Clock
+	// a reference to the clock of the simulation this request is running in
+	public clockRef: Clock
 	constructor(public sim: Simulation) {
-		this.clock = this.sim.clock
-		this.arrival_t = this.clock.t
+		this.clockRef = this.sim.clock
+		this.arrival_t = this.clockRef.t
 		this.in_progress = false
 		this.complete = false
 		this.timed_out = false
 	}
+	// called when the request is popped from the queue and given a server from
+	// the pool
 	public start(svc: number) {
-		this.start_t = this.clock.t
+		this.start_t = this.clockRef.t
 		this.svc = svc
 		this.in_progress = true
 	}
+	// called every clock tick for each request being handled by a server,
+	// this method determines whether service has completed
 	public serve() {
 		if (this.elapsed_total() > this.sim.settings.timeout) {
+			// timeout
 			this.timed_out = true
 			this.in_progress = false
 			this.sim.metrics.timed_out++
 		} else if (this.remaining(this.sim.settings.slowdown) <= 0) {
+			// complete
 			this.complete = true
 			this.in_progress = false
 			this.sim.metrics.completed++
 			this.sim.metrics.avg_latency += this.elapsed_total()
 		}
 	}
+	// time spent since arrival
 	public elapsed_total(): number {
-		return this.clock.t - this.arrival_t
+		return this.clockRef.t - this.arrival_t
 	}
+	// time spent in service (after being popped from the queue and given a server)
 	public elapsed_svc(): number {
-		return this.in_progress ? this.clock.t - this.start_t : 0
+		return this.in_progress ? this.clockRef.t - this.start_t : 0
 	}
+	// time remaining, according to clock-time, modified by slowdown factor and,
+	// importantly, by the queue length itself (the machine spends some cycles
+	// simply managing the queue list/array)
 	public remaining(slowdown: number = 0): number {
 		const queueLengthFactor = (this.sim.queue.length + 1) / 100
 		return (1 + slowdown + queueLengthFactor) * this.svc - this.elapsed_svc()
@@ -73,18 +88,23 @@ export class Request {
 	}
 }
 
+// multiple Server instances are created by the Simulation instance
 export class Server {
 	public req: Request
 	public busy: boolean
 	constructor(public sim: Simulation) {
 		this.busy = false
 	}
+	// pair this server with a request - called by Simulation instance when
+	// this server is free and a request is available in the queue to serve next
 	public handle(req: Request, svc: number) {
 		this.sim.metrics.handled++
 		this.req = req
 		this.req.start(svc)
 		this.busy = true
 	}
+	// a server, while it has a request, will call its serve method each time
+	// clock tick, setting this.busy = false if the request has finished
 	public serve() {
 		this.req.serve()
 		if (this.req.done()) {
@@ -93,25 +113,7 @@ export class Server {
 	}
 }
 
-export class ArrivalProcess {
-	constructor(
-		public sim: Simulation,
-		// the number of arrivals which should occur each
-		// timestep (allows fractional, and carries over, in the case of very
-		// low arrival rates)
-		public arrivalCount: number = 0,
-	) {}
-	public arrivals(clock: Clock): Request[] {
-		let mu = clock.dt * (this.sim.settings.mean_log_rps / 1000)
-		const X = jStat.lognormal(mu, 1).sample()
-		this.arrivalCount += Math.max(0, X)
-		const N = Math.floor(this.arrivalCount)
-		let arrivals = Array.from(Array(N)).map(() => new Request(this.sim))
-		this.arrivalCount -= Math.floor(this.arrivalCount)
-		return arrivals
-	}
-}
-
+// settings used to control the behaviour of the Simulation
 export interface SimulationSettings {
 	// the number of concurrent requests which can be processed ("servers")
 	n: number
@@ -132,13 +134,12 @@ export interface SimulationSettings {
 	runtime: number
 }
 
-export class SimulationControl {
-	constructor(private controlFunc: (s: Simulation) => void) {}
-	public doControl(s: Simulation) {
-		this.controlFunc(s)
-	}
-}
+// SimultionControls are functions which are called each clock tick to
+// control the simulation in some way
+export type SimulationControl = (s: Simulation) => void
 
+// a Metrics object is a set of data points which correspond to a specific
+// instant in time
 export class Metrics {
 	constructor(
 		public t: number,
@@ -155,21 +156,31 @@ export class Metrics {
 	) {}
 }
 
+// the main class which is instantiated and run, using all the other parts defined
+// above. A simluation simulates a queue of requests at which arrivals are occurring,
+// and a pool of servers which are processing requests
 export class Simulation {
+	// settings to control the simulation
 	public settings: SimulationSettings
+	// clock by which all events are measured
 	public clock: Clock
-	public arrivalProcess: ArrivalProcess
+	// queue of waiting requests which cannot be immediately served (servers busy)
 	public queue: Request[]
+	// list of servers which serve requests
 	public servers: Server[]
+	// metrics of the queue's behaviour associated with the current clock tick
+	// (to be pushed, each clock-tick, into the timeseries list)
 	public metrics: Metrics
+	// list of metrics recorded each clock tick
 	public timeseries: Metrics[]
+	// a running counter used to keep track of how many requests should be arriving
+	public arrivalCount: number = 0
 	constructor(
 		settings: SimulationSettings,
 		public controls: SimulationControl[],
 	) {
 		this.settings = Object.assign({}, settings)
 		this.clock = new Clock(this.settings.runtime)
-		this.arrivalProcess = new ArrivalProcess(this)
 		this.queue = []
 		this.servers = Array.from(Array(this.settings.n)).map(
 			() => new Server(this),
@@ -177,6 +188,8 @@ export class Simulation {
 		this.timeseries = []
 	}
 
+	// used by the main script to run the simulation, having been created with
+	// the constructor first
 	public run() {
 		while (!this.clock.done()) {
 			this.metrics = new Metrics(this.clock.t)
@@ -186,16 +199,19 @@ export class Simulation {
 		}
 	}
 
+	// runs each clock tick, pushing the current metrics into the list (for later
+	// export to CSV)
 	private record_metrics() {
 		this.metrics.avg_latency /= this.metrics.completed
 		this.metrics.slowdown = this.settings.slowdown
 		this.timeseries.push(this.metrics)
 	}
 
+	// runs each loop inside the run() method
 	private iterate() {
 		// process controls based on clock time
 		this.controls.forEach((control: SimulationControl) => {
-			control.doControl(this)
+			control(this)
 		})
 		// apply timeout to elements in wait_queue
 		let timed_out_in_queue = this.queue.filter((r: Request) => {
@@ -207,11 +223,24 @@ export class Simulation {
 		})
 		this.metrics.queue_length = this.queue.length
 		//determine how many requests are arriving and add them to the wait queue
-		let arrivals = this.arrivalProcess.arrivals(this.clock)
+		let arrivals = this.arrivalProcess()
 		this.metrics.arrived = arrivals.length
 		this.queue = this.queue.concat(arrivals)
 		//process serving and queued requests
 		this.service_process()
+	}
+
+	public arrivalProcess(): Request[] {
+		let mu = this.clock.dt * (this.settings.mean_log_rps / 1000)
+		const X = jStat.lognormal(mu, 1).sample()
+		this.arrivalCount += Math.max(0, X)
+		const N = Math.floor(this.arrivalCount)
+		let arrivals: Request[] = []
+		if (N > 0) {
+			arrivals = Array.from(Array(N)).map(() => new Request(this))
+			this.arrivalCount -= Math.floor(this.arrivalCount)
+		}
+		return arrivals
 	}
 
 	public service_process() {
